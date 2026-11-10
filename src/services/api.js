@@ -4,7 +4,8 @@
 import axios from 'axios';
 import { addDays, toDateKey, todayKey } from '../utils/dates';
 
-const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+const PROD_API_URL = 'https://grovio-backend-k2hl.onrender.com/api';
+const BASE_URL = import.meta.env.VITE_API_URL || (import.meta.env.PROD ? PROD_API_URL : 'http://localhost:5000/api');
 let USE_MOCK = false;
 
 const client = axios.create({ baseURL: BASE_URL, timeout: 8000 });

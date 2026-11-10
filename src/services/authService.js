@@ -3,9 +3,9 @@
 
 import axios from 'axios';
 
-const BASE_URL = import.meta.env.VITE_API_URL
-  ? `${import.meta.env.VITE_API_URL.replace(/\/+$/, '')}/auth`
-  : 'http://localhost:5000/api/auth';
+const PROD_API_ROOT = 'https://grovio-backend-k2hl.onrender.com/api';
+const API_ROOT = import.meta.env.VITE_API_URL || (import.meta.env.PROD ? PROD_API_ROOT : 'http://localhost:5000/api');
+const BASE_URL = `${API_ROOT.replace(/\/+$/, '')}/auth`;
 const client = axios.create({ baseURL: BASE_URL, timeout: 5000 });
 
 const SAVED_CREDS_KEY = 'grovio_saved_credentials';
