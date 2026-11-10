@@ -1,0 +1,25 @@
+{
+  "name": "Grovio — Food Preservation Space",
+  "short_name": "Grovio",
+  "description": "Personal Household Food Preservation Space. Track food freshness, decay timers, and pantry stock levels intelligently.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#f8fafc",
+  "theme_color": "#166534",
+  "icons": [
+    {
+      "src": "/icon-192.svg",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["lifestyle", "food", "productivity"]
+}
