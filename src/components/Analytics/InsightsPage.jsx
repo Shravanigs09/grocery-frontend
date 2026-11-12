@@ -13,9 +13,13 @@ import {
   Clock,
   Lock,
   RefreshCw,
+  History,
+  Calendar,
+  Sparkles,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { fetchHousehold } from '../../services/api';
+import { todayKey } from '../../utils/dates';
 import NotificationBellDropdown from '../Notifications/NotificationBellDropdown';
 
 export default function InsightsPage({
@@ -27,9 +31,10 @@ export default function InsightsPage({
 }) {
   const { user } = useAuth();
   const [household, setHousehold] = useState(null);
-  const [activeTab, setActiveTab] = useState('achievements'); // 'achievements' | 'leaderboard' | 'quests'
+  const [activeTab, setActiveTab] = useState('achievements'); // 'achievements' | 'quests' | 'leaderboard' | 'history'
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [lastRefreshedText, setLastRefreshedText] = useState('Live');
+  const [streakTimeframe, setStreakTimeframe] = useState(7); // 7 or 14 days
 
   // Fetch actual household members from DB
   const loadHousehold = useCallback(() => {
@@ -110,11 +115,10 @@ export default function InsightsPage({
   };
 
   // ── 2. REAL ZERO-WASTE STREAK CALCULATION ──────────────────────────────────
-  // Streak = Number of consecutive days since last wasted item, or since account started
+  // Current active zero-waste streak (days since last wasted item, or since start)
   const realStreakDays = useMemo(() => {
     if (wastedItems.length === 0) {
       if (items.length === 0 && consumedCount === 0) return 0;
-      // Get valid timestamps from active items or user createdAt
       const validTimestamps = items
         .map((i) => parseTimestamp(i.createdAt || i.purchaseDate))
         .filter((t) => t > 0);
@@ -127,7 +131,6 @@ export default function InsightsPage({
       return Math.max(1, safeDiff + 1);
     }
 
-    // Find the latest date an item was wasted
     const wasteTimestamps = wastedItems
       .map((w) => parseTimestamp(w.date || w.resolvedDate || w.updatedAt))
       .filter((t) => t > 0);
@@ -137,35 +140,77 @@ export default function InsightsPage({
     return Math.max(0, Number.isFinite(diffDaysSinceWaste) ? diffDaysSinceWaste : 0);
   }, [wastedItems, items, consumedCount, user?.createdAt]);
 
-  // Streak days of the week (Mon to Today)
-  const streakDaysOfWeek = useMemo(() => {
-    const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-    const result = [];
-    const validStreak = Number.isFinite(realStreakDays) ? realStreakDays : 0;
+  // All-time best historical zero-waste streak
+  const bestStreakDays = useMemo(() => {
+    if (wastedItems.length === 0) {
+      return Math.max(1, realStreakDays);
+    }
+    const wasteTimestamps = wastedItems
+      .map((w) => parseTimestamp(w.date || w.resolvedDate || w.updatedAt))
+      .filter((t) => t > 0)
+      .sort((a, b) => a - b);
 
-    for (let i = 6; i >= 0; i--) {
+    if (wasteTimestamps.length === 0) return Math.max(1, realStreakDays);
+
+    let maxGap = realStreakDays;
+    const userStart = parseTimestamp(user?.createdAt) || (wasteTimestamps[0] - 86400000 * 3);
+    const firstGap = Math.floor((wasteTimestamps[0] - userStart) / 86400000);
+    if (firstGap > maxGap) maxGap = firstGap;
+
+    for (let i = 1; i < wasteTimestamps.length; i++) {
+      const gap = Math.floor((wasteTimestamps[i] - wasteTimestamps[i - 1]) / 86400000);
+      if (gap > maxGap) maxGap = gap;
+    }
+
+    return Math.max(realStreakDays, maxGap);
+  }, [wastedItems, realStreakDays, user?.createdAt]);
+
+  // Dynamic Past Days History (7 or 14 days)
+  const pastDaysHistory = useMemo(() => {
+    const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const result = [];
+    const daysToShow = streakTimeframe; // 7 or 14
+
+    for (let i = daysToShow - 1; i >= 0; i--) {
       const d = new Date();
       d.setDate(d.getDate() - i);
       const isToday = i === 0;
-      const isStreakDay = validStreak > i || (isToday && validStreak > 0);
+      const dateKeyStr = d.toISOString().slice(0, 10);
+      const dateDisplay = `${monthNames[d.getMonth()]} ${d.getDate()}`;
+      const dayName = dayNames[d.getDay()];
+
+      const itemsOnDay = wasteLog.filter((w) => {
+        const wDate = w.date || w.resolvedDate || w.updatedAt;
+        if (!wDate) return false;
+        return String(wDate).startsWith(dateKeyStr);
+      });
+
+      const dayConsumed = itemsOnDay.filter((w) => String(w.status).toLowerCase() === 'consumed').length;
+      const dayWasted = itemsOnDay.filter((w) => String(w.status).toLowerCase() === 'wasted').length;
+
+      const isZeroWaste = dayWasted === 0 && (i < realStreakDays || dayConsumed > 0 || isToday);
 
       result.push({
-        day: isToday ? 'Today' : dayNames[d.getDay()],
-        completed: isStreakDay,
+        dayName,
+        dateDisplay,
         isToday,
+        consumed: dayConsumed,
+        wasted: dayWasted,
+        completed: isZeroWaste,
+        hasActivity: itemsOnDay.length > 0,
       });
     }
+
     return result;
-  }, [realStreakDays]);
+  }, [wasteLog, streakTimeframe, realStreakDays]);
 
   // ── 3. REAL XP & LEVEL CALCULATION ─────────────────────────────────────────
-  // Purely earned from real user actions:
-  // +50 XP per consumed item
-  // +15 XP per active item in inventory
-  // +25 XP per pantry staple tracked
-  // +20 XP per streak day
+  const pantryCount = items.filter((i) => i.panelType === 'PANTRY').length;
+  const aiRecipeUses = parseInt(localStorage.getItem('grovio_ai_recipe_count') || '0', 10);
+  const co2PreventedKg = (consumedCount * 1.9).toFixed(1);
+
   const realEarnedXp = useMemo(() => {
-    const pantryCount = items.filter((i) => i.panelType === 'PANTRY').length;
     const validStreak = Number.isFinite(realStreakDays) ? realStreakDays : 0;
     const total = (
       consumedCount * 50 +
@@ -174,7 +219,7 @@ export default function InsightsPage({
       validStreak * 20
     );
     return Number.isFinite(total) ? Math.max(0, total) : 0;
-  }, [consumedCount, items, realStreakDays]);
+  }, [consumedCount, items, pantryCount, realStreakDays]);
 
   const currentLevel = Math.max(1, Math.floor(realEarnedXp / 500) + 1);
   const xpIntoCurrentLevel = realEarnedXp % 500;
@@ -191,11 +236,110 @@ export default function InsightsPage({
   ];
   const levelTitle = levelTitles[Math.min(currentLevel - 1, levelTitles.length - 1)];
 
-  // ── 4. REAL BADGE UNLOCK VERIFICATION ──────────────────────────────────────
-  const pantryCount = items.filter((i) => i.panelType === 'PANTRY').length;
-  const aiRecipeUses = parseInt(localStorage.getItem('grovio_ai_recipe_count') || '0', 10);
-  const co2PreventedKg = (consumedCount * 1.9).toFixed(1);
+  // All 6 Level Tiers Roadmap
+  const allLevelTiers = [
+    {
+      level: 1,
+      title: 'Kitchen Initiate',
+      xpRange: '0 – 499 XP',
+      minXp: 0,
+      icon: '🌱',
+      perk: 'Fresh inventory tracking, shelf-life monitoring & barcode scanning.',
+    },
+    {
+      level: 2,
+      title: 'Fresh Produce Scout',
+      xpRange: '500 – 999 XP',
+      minXp: 500,
+      icon: '🥦',
+      perk: 'Environmental storage decay factors (Fridge/Freezer) & expiry alerts.',
+    },
+    {
+      level: 3,
+      title: 'Pantry Specialist',
+      xpRange: '1,000 – 1,499 XP',
+      minXp: 1000,
+      icon: '📦',
+      perk: 'Dry pantry stock level auditing & auto-bridging to Shopping Notes.',
+    },
+    {
+      level: 4,
+      title: 'Zero-Waste Guardian',
+      xpRange: '1,500 – 1,999 XP',
+      minXp: 1500,
+      icon: '🛡️',
+      perk: 'Prioritized AI Chef recipes targeting items nearing critical decay.',
+    },
+    {
+      level: 5,
+      title: 'Culinary Alchemist',
+      xpRange: '2,000 – 2,499 XP',
+      minXp: 2000,
+      icon: '✨',
+      perk: 'Advanced household savings analytics & carbon emission offset metrics.',
+    },
+    {
+      level: 6,
+      title: 'Grandmaster Chef',
+      xpRange: '2,500+ XP',
+      minXp: 2500,
+      icon: '👑',
+      perk: 'Pinnacle zero-waste badge & full multi-tenant family synchronizer.',
+    },
+  ];
 
+  // Past XP Activity Audit Trail
+  const pastXpActivities = useMemo(() => {
+    const list = [];
+
+    // Consumed items (+50 XP)
+    consumedItems.forEach((c, idx) => {
+      const dateStr = c.date || c.resolvedDate || c.updatedAt || todayKey();
+      list.push({
+        id: `xp_c_${c.id || idx}`,
+        title: `Rescued & Consumed: ${c.itemName || c.name || 'Produce Item'}`,
+        category: c.category || 'Produce',
+        xp: 50,
+        date: dateStr,
+        timestamp: parseTimestamp(dateStr),
+        icon: '🥦',
+        badgeColor: '#10b981',
+      });
+    });
+
+    // Active pantry & inventory (+15 / +25 XP)
+    items.forEach((item, idx) => {
+      const dateStr = item.purchaseDate || item.createdAt || todayKey();
+      list.push({
+        id: `xp_item_${item.id || idx}`,
+        title: `Stocked Inventory: ${item.name}`,
+        category: item.panelType === 'PANTRY' ? 'Dry Pantry Staple' : 'Perishable Grocery',
+        xp: item.panelType === 'PANTRY' ? 25 : 15,
+        date: dateStr,
+        timestamp: parseTimestamp(dateStr),
+        icon: item.panelType === 'PANTRY' ? '📦' : '🌱',
+        badgeColor: '#0ea5e9',
+      });
+    });
+
+    // Zero-waste streak milestones (+20 XP/day)
+    if (realStreakDays > 0) {
+      list.push({
+        id: 'xp_streak_bonus',
+        title: `${realStreakDays}-Day Zero-Waste Streak Milestone`,
+        category: 'Streak Bonus',
+        xp: realStreakDays * 20,
+        date: todayKey(),
+        timestamp: Date.now(),
+        icon: '🔥',
+        badgeColor: '#f59e0b',
+      });
+    }
+
+    return list.sort((a, b) => b.timestamp - a.timestamp);
+  }, [consumedItems, items, realStreakDays]);
+
+  // ── 4. REAL BADGE UNLOCK VERIFICATION ──────────────────────────────────────
   const badges = [
     {
       id: 'badge_first_rescue',
@@ -218,8 +362,8 @@ export default function InsightsPage({
       color: '#f59e0b',
       bg: 'rgba(245, 158, 11, 0.15)',
       xp: 250,
-      unlocked: realStreakDays >= 7,
-      progress: `${Math.min(7, realStreakDays)} / 7 consecutive days`,
+      unlocked: bestStreakDays >= 7,
+      progress: `${Math.min(7, bestStreakDays)} / 7 consecutive days`,
     },
     {
       id: 'badge_ai_chef',
@@ -275,7 +419,9 @@ export default function InsightsPage({
   const expiringItems = useMemo(() => {
     return items.filter((i) => {
       if (!i.expiryDate) return false;
-      const diff = (new Date(i.expiryDate) - new Date()) / (1000 * 60 * 60 * 24);
+      const t = new Date(i.expiryDate).getTime();
+      if (Number.isNaN(t)) return false;
+      const diff = (t - Date.now()) / (1000 * 60 * 60 * 24);
       return diff <= 2;
     });
   }, [items]);
@@ -319,7 +465,6 @@ export default function InsightsPage({
   ];
 
   // ── 6. REAL HOUSEHOLD LEADERBOARD ──────────────────────────────────────────
-  // Show only real household members from database!
   const leaderboardMembers = useMemo(() => {
     const currentName = user?.name || user?.username || 'You';
     const realMembers = household?.members || [];
@@ -339,7 +484,6 @@ export default function InsightsPage({
       }).sort((a, b) => b.score - a.score);
     }
 
-    // Single real player if solo
     return [
       {
         id: user?.id || 'me',
@@ -454,7 +598,7 @@ export default function InsightsPage({
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: '1.4fr 1fr',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))',
           gap: 18,
         }}
       >
@@ -562,6 +706,31 @@ export default function InsightsPage({
                 />
               </div>
             </div>
+
+            {/* Milestone Summary & Past Levels Link */}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 12 }}>
+              <span style={{ fontSize: 11, background: 'rgba(255, 255, 255, 0.12)', padding: '2px 8px', borderRadius: 6, color: '#c7d2fe', fontWeight: 600 }}>
+                {currentLevel > 1 ? `✓ Passed ${currentLevel - 1} Past Tier${currentLevel > 2 ? 's' : ''}` : 'Tier 1 in Progress'}
+              </span>
+              <button
+                type="button"
+                onClick={() => setActiveTab('history')}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  color: '#38bdf8',
+                  fontSize: 11.5,
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  padding: 0,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 4,
+                }}
+              >
+                Past Level Roadmap &amp; Logs →
+              </button>
+            </div>
           </div>
 
           <div
@@ -601,17 +770,32 @@ export default function InsightsPage({
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#fed7aa', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
                 <Flame size={15} color="#fb923c" /> Live Zero-Waste Streak
               </div>
-              <span
-                style={{
-                  fontSize: 11,
-                  fontWeight: 800,
-                  background: 'rgba(255, 255, 255, 0.2)',
-                  padding: '2px 8px',
-                  borderRadius: 99,
-                }}
-              >
-                {wastedCount === 0 ? '0 Items Spoiled' : `${wastedCount} Spoiled`}
-              </span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 800,
+                    background: 'rgba(251, 146, 60, 0.3)',
+                    color: '#ffedd5',
+                    padding: '2px 8px',
+                    borderRadius: 99,
+                    border: '1px solid rgba(251, 146, 60, 0.5)',
+                  }}
+                >
+                  Best: {bestStreakDays}d 🔥
+                </span>
+                <span
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 800,
+                    background: 'rgba(255, 255, 255, 0.2)',
+                    padding: '2px 8px',
+                    borderRadius: 99,
+                  }}
+                >
+                  {wastedCount === 0 ? '0 Items Spoiled' : `${wastedCount} Spoiled`}
+                </span>
+              </div>
             </div>
 
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 12 }}>
@@ -627,37 +811,80 @@ export default function InsightsPage({
             </p>
           </div>
 
-          {/* 7-Day Dot Tracker */}
+          {/* Past Days Timeline Tracker (7d or 14d) */}
           <div style={{ marginTop: 16 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 6 }}>
-              {streakDaysOfWeek.map((d) => (
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+              <span style={{ fontSize: 11, color: '#fed7aa', fontWeight: 700 }}>
+                Past {streakTimeframe} Days Activity:
+              </span>
+              <div style={{ display: 'flex', gap: 4 }}>
+                <button
+                  type="button"
+                  onClick={() => setStreakTimeframe(7)}
+                  style={{
+                    padding: '2px 8px',
+                    borderRadius: 6,
+                    border: 'none',
+                    background: streakTimeframe === 7 ? '#fb923c' : 'rgba(255, 255, 255, 0.15)',
+                    color: '#ffffff',
+                    fontSize: 10,
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                  }}
+                >
+                  7 Days
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setStreakTimeframe(14)}
+                  style={{
+                    padding: '2px 8px',
+                    borderRadius: 6,
+                    border: 'none',
+                    background: streakTimeframe === 14 ? '#fb923c' : 'rgba(255, 255, 255, 0.15)',
+                    color: '#ffffff',
+                    fontSize: 10,
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                  }}
+                >
+                  14 Days
+                </button>
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 4, overflowX: 'auto', paddingBottom: 4 }}>
+              {pastDaysHistory.map((d, idx) => (
                 <div
-                  key={d.day}
+                  key={`${d.dateDisplay}_${idx}`}
+                  title={`${d.dayName} (${d.dateDisplay}): ${d.completed ? 'Zero waste maintained' : `${d.wasted} items spoiled`}`}
                   style={{
                     flex: 1,
+                    minWidth: streakTimeframe === 14 ? 20 : 32,
                     display: 'flex',
                     flexDirection: 'column',
                     alignItems: 'center',
-                    gap: 6,
+                    gap: 5,
                   }}
                 >
                   <div
                     style={{
-                      width: 32,
-                      height: 32,
-                      borderRadius: 10,
+                      width: streakTimeframe === 14 ? 22 : 32,
+                      height: streakTimeframe === 14 ? 22 : 32,
+                      borderRadius: 8,
                       background: d.completed ? '#fb923c' : 'rgba(255, 255, 255, 0.15)',
                       display: 'flex',
                       alignItems: 'center',
                       justifyContent: 'center',
                       color: '#ffffff',
                       boxShadow: d.completed ? '0 2px 8px rgba(251, 146, 60, 0.4)' : 'none',
+                      fontSize: streakTimeframe === 14 ? 11 : 14,
                     }}
                   >
-                    {d.completed ? <CheckCircle2 size={16} /> : <Clock size={14} opacity={0.6} />}
+                    {d.completed ? <CheckCircle2 size={streakTimeframe === 14 ? 12 : 16} /> : <Clock size={streakTimeframe === 14 ? 11 : 14} opacity={0.6} />}
                   </div>
-                  <span style={{ fontSize: 10, color: d.isToday ? '#fed7aa' : '#ffedd5', fontWeight: d.isToday ? 800 : 500 }}>
-                    {d.day}
+                  <span style={{ fontSize: 9.5, color: d.isToday ? '#fed7aa' : '#ffedd5', fontWeight: d.isToday ? 800 : 500 }}>
+                    {d.dayName[0]}
                   </span>
                 </div>
               ))}
@@ -673,12 +900,14 @@ export default function InsightsPage({
           gap: 10,
           borderBottom: '1px solid var(--border, #e2e8f0)',
           paddingBottom: 2,
+          overflowX: 'auto',
         }}
       >
         {[
           { id: 'achievements', label: 'Real Badges', icon: Award, count: `${badges.filter((b) => b.unlocked).length}/${badges.length}` },
           { id: 'quests',       label: 'Daily Quests', icon: Target, count: `${quests.filter((q) => q.completed).length}/${quests.length}` },
           { id: 'leaderboard',  label: 'Household Leaderboard', icon: Users, count: leaderboardMembers.length },
+          { id: 'history',      label: 'Past Streak & Level History', icon: History, count: `${pastXpActivities.length} Logs` },
         ].map((tab) => {
           const isActive = activeTab === tab.id;
           const Icon = tab.icon;
@@ -700,6 +929,7 @@ export default function InsightsPage({
                 alignItems: 'center',
                 gap: 8,
                 transition: 'all 0.15s ease',
+                whiteSpace: 'nowrap',
               }}
             >
               <Icon size={16} color={isActive ? '#10b981' : '#94a3b8'} />
@@ -740,7 +970,6 @@ export default function InsightsPage({
                 overflow: 'hidden',
               }}
             >
-              {/* Badge Icon Medallion */}
               <div
                 style={{
                   width: 54,
@@ -883,73 +1112,59 @@ export default function InsightsPage({
                     style={{
                       padding: '8px 14px',
                       borderRadius: 10,
-                      background: 'linear-gradient(135deg, #10b981, #059669)',
-                      color: '#ffffff',
                       border: 'none',
+                      background: '#10b981',
+                      color: '#ffffff',
                       fontSize: 12,
                       fontWeight: 700,
                       cursor: 'pointer',
-                      whiteSpace: 'nowrap',
                     }}
                   >
                     {q.actionLabel}
                   </button>
-                ) : (
-                  <span
-                    style={{
-                      padding: '6px 12px',
-                      borderRadius: 8,
-                      background: q.completed ? 'rgba(16, 185, 129, 0.12)' : 'var(--bg-muted, #f1f5f9)',
-                      color: q.completed ? '#059669' : '#94a3b8',
-                      fontSize: 12,
-                      fontWeight: 700,
-                    }}
-                  >
-                    {q.completed ? 'Completed ✓' : 'In Progress'}
-                  </span>
-                )}
+                ) : null}
               </div>
             ))}
           </div>
         </div>
       )}
 
-      {/* ── Tab View 3: Real Household Family Leaderboard ─────────────────── */}
+      {/* ── Tab View 3: Real Household Leaderboard ────────────────────────── */}
       {activeTab === 'leaderboard' && (
-        <div
-          style={{
-            background: 'var(--surface, #ffffff)',
-            border: '1px solid var(--border, #e2e8f0)',
-            borderRadius: 20,
-            padding: '24px',
-            boxShadow: '0 2px 10px rgba(0,0,0,0.02)',
-          }}
-        >
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div
+            style={{
+              padding: '16px 20px',
+              borderRadius: 16,
+              background: 'var(--surface, #ffffff)',
+              border: '1px solid var(--border, #e2e8f0)',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+            }}
+          >
             <div>
-              <h3 style={{ margin: 0, fontSize: 17, fontWeight: 800, color: 'var(--text, #0f172a)' }}>
-                {household?.name || 'Household'} Family Rankings
-              </h3>
-              <p style={{ margin: '2px 0 0', fontSize: 12.5, color: 'var(--text-muted, #64748b)' }}>
-                {household?.members?.length > 1
-                  ? 'Real-life rankings across connected household members.'
-                  : 'Invite family members using your Kitchen Code to compete together!'}
+              <h4 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: 'var(--text, #0f172a)' }}>
+                Household Ranking
+              </h4>
+              <p style={{ margin: '2px 0 0', fontSize: 12, color: 'var(--text-muted, #64748b)' }}>
+                {user?.householdCode
+                  ? `Members joined in Shared Kitchen Code: ${user.householdCode}`
+                  : 'Private kitchen profile (Share kitchen code to compete with household members)'}
               </p>
             </div>
-            {household?.code && (
-              <span
-                style={{
-                  fontSize: 12,
-                  fontWeight: 700,
-                  color: '#059669',
-                  background: 'rgba(16, 185, 129, 0.12)',
-                  padding: '4px 10px',
-                  borderRadius: 8,
-                }}
-              >
-                Kitchen Code: {household.code}
-              </span>
-            )}
+            <span
+              style={{
+                fontSize: 12,
+                fontWeight: 800,
+                color: '#10b981',
+                background: 'rgba(16, 185, 129, 0.12)',
+                padding: '4px 10px',
+                borderRadius: 99,
+              }}
+            >
+              {leaderboardMembers.length} Active Member{leaderboardMembers.length > 1 ? 's' : ''}
+            </span>
           </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -1010,6 +1225,402 @@ export default function InsightsPage({
                 </div>
               );
             })}
+          </div>
+        </div>
+      )}
+
+      {/* ── Tab View 4: PAST STREAK & LEVEL HISTORY (Comprehensive Past Data) ── */}
+      {activeTab === 'history' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
+          {/* Historical Key Stat Highlights */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: 14 }}>
+            <div
+              style={{
+                background: 'var(--surface, #ffffff)',
+                border: '1px solid var(--border, #e2e8f0)',
+                borderRadius: 16,
+                padding: '16px 18px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 14,
+              }}
+            >
+              <div
+                style={{
+                  width: 46,
+                  height: 46,
+                  borderRadius: 12,
+                  background: 'rgba(245, 158, 11, 0.15)',
+                  color: '#d97706',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
+                <Flame size={24} />
+              </div>
+              <div>
+                <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted, #64748b)', textTransform: 'uppercase' }}>
+                  All-Time Best Streak
+                </div>
+                <div style={{ fontSize: 22, fontWeight: 900, color: 'var(--text, #0f172a)' }}>
+                  {bestStreakDays} Days 🔥
+                </div>
+              </div>
+            </div>
+
+            <div
+              style={{
+                background: 'var(--surface, #ffffff)',
+                border: '1px solid var(--border, #e2e8f0)',
+                borderRadius: 16,
+                padding: '16px 18px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 14,
+              }}
+            >
+              <div
+                style={{
+                  width: 46,
+                  height: 46,
+                  borderRadius: 12,
+                  background: 'rgba(16, 185, 129, 0.15)',
+                  color: '#059669',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
+                <Trophy size={24} />
+              </div>
+              <div>
+                <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted, #64748b)', textTransform: 'uppercase' }}>
+                  Current Level Achieved
+                </div>
+                <div style={{ fontSize: 22, fontWeight: 900, color: 'var(--text, #0f172a)' }}>
+                  Level {currentLevel}
+                </div>
+              </div>
+            </div>
+
+            <div
+              style={{
+                background: 'var(--surface, #ffffff)',
+                border: '1px solid var(--border, #e2e8f0)',
+                borderRadius: 16,
+                padding: '16px 18px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 14,
+              }}
+            >
+              <div
+                style={{
+                  width: 46,
+                  height: 46,
+                  borderRadius: 12,
+                  background: 'rgba(14, 165, 233, 0.15)',
+                  color: '#0284c7',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
+                <Zap size={24} />
+              </div>
+              <div>
+                <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted, #64748b)', textTransform: 'uppercase' }}>
+                  Total Real XP Earned
+                </div>
+                <div style={{ fontSize: 22, fontWeight: 900, color: 'var(--text, #0f172a)' }}>
+                  {realEarnedXp.toLocaleString()} XP
+                </div>
+              </div>
+            </div>
+
+            <div
+              style={{
+                background: 'var(--surface, #ffffff)',
+                border: '1px solid var(--border, #e2e8f0)',
+                borderRadius: 16,
+                padding: '16px 18px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 14,
+              }}
+            >
+              <div
+                style={{
+                  width: 46,
+                  height: 46,
+                  borderRadius: 12,
+                  background: 'rgba(139, 92, 246, 0.15)',
+                  color: '#7c3aed',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
+                <Sparkles size={24} />
+              </div>
+              <div>
+                <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted, #64748b)', textTransform: 'uppercase' }}>
+                  Food Items Rescued
+                </div>
+                <div style={{ fontSize: 22, fontWeight: 900, color: 'var(--text, #0f172a)' }}>
+                  {consumedCount} / {totalProcessed || items.length} Items
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Section A: 14-Day Past Streak & Daily Preservation History */}
+          <div
+            style={{
+              background: 'var(--surface, #ffffff)',
+              borderRadius: 20,
+              padding: '22px 24px',
+              border: '1px solid var(--border, #e2e8f0)',
+              boxShadow: '0 2px 10px rgba(0,0,0,0.03)',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 10 }}>
+              <div>
+                <h3 style={{ margin: 0, fontSize: 17, fontWeight: 800, color: 'var(--text, #0f172a)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <Calendar size={18} color="#f59e0b" /> Past 14-Day Zero-Waste Calendar History
+                </h3>
+                <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--text-muted, #64748b)' }}>
+                  Day-by-day record of food preserved versus food spoiled in your household.
+                </p>
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <span style={{ fontSize: 12, fontWeight: 700, color: '#059669', display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <span style={{ width: 8, height: 8, borderRadius: 99, background: '#10b981' }} />
+                  Zero-Waste Kept ({pastDaysHistory.filter((d) => d.completed).length} Days)
+                </span>
+                <span style={{ fontSize: 12, fontWeight: 700, color: '#e11d48', display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <span style={{ width: 8, height: 8, borderRadius: 99, background: '#e11d48' }} />
+                  Spoilage Logged ({pastDaysHistory.filter((d) => !d.completed).length} Days)
+                </span>
+              </div>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))', gap: 10 }}>
+              {pastDaysHistory.map((d, idx) => (
+                <div
+                  key={`${d.dateDisplay}_cal_${idx}`}
+                  style={{
+                    padding: '12px 14px',
+                    borderRadius: 14,
+                    background: d.completed ? 'rgba(16, 185, 129, 0.08)' : 'rgba(239, 68, 68, 0.08)',
+                    border: d.completed ? '1.5px solid rgba(16, 185, 129, 0.3)' : '1.5px solid rgba(239, 68, 68, 0.3)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    justifyContent: 'space-between',
+                    minHeight: 82,
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ fontSize: 12, fontWeight: 800, color: d.isToday ? '#0f172a' : 'var(--text, #1e293b)' }}>
+                      {d.isToday ? 'Today' : d.dayName}
+                    </span>
+                    <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-muted, #64748b)' }}>
+                      {d.dateDisplay}
+                    </span>
+                  </div>
+
+                  <div style={{ marginTop: 8 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11, fontWeight: 800, color: d.completed ? '#059669' : '#dc2626' }}>
+                      {d.completed ? '🔥 Preserved' : '⚠️ Spoilage'}
+                    </div>
+                    <div style={{ fontSize: 10, color: 'var(--text-muted, #64748b)', marginTop: 2 }}>
+                      {d.consumed > 0 || d.wasted > 0
+                        ? `${d.consumed} eaten · ${d.wasted} lost`
+                        : d.completed
+                        ? '0 items lost'
+                        : 'No activity'}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Section B: All 6 Level Tiers Progression Roadmap */}
+          <div
+            style={{
+              background: 'var(--surface, #ffffff)',
+              borderRadius: 20,
+              padding: '22px 24px',
+              border: '1px solid var(--border, #e2e8f0)',
+              boxShadow: '0 2px 10px rgba(0,0,0,0.03)',
+            }}
+          >
+            <div style={{ marginBottom: 16 }}>
+              <h3 style={{ margin: 0, fontSize: 17, fontWeight: 800, color: 'var(--text, #0f172a)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                <Trophy size={18} color="#10b981" /> Kitchen Level Milestones &amp; Tiers
+              </h3>
+              <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--text-muted, #64748b)' }}>
+                Track past tiers you have conquered and discover perks unlocked at each stage.
+              </p>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(310px, 1fr))', gap: 12 }}>
+              {allLevelTiers.map((tier) => {
+                const isPassed = currentLevel > tier.level;
+                const isCurrent = currentLevel === tier.level;
+                const isLocked = currentLevel < tier.level;
+
+                return (
+                  <div
+                    key={tier.level}
+                    style={{
+                      padding: '16px 18px',
+                      borderRadius: 16,
+                      background: isCurrent
+                        ? 'linear-gradient(135deg, rgba(30, 27, 75, 0.04), rgba(49, 46, 129, 0.08))'
+                        : isPassed
+                        ? 'var(--surface, #ffffff)'
+                        : 'var(--bg-muted, #f8fafc)',
+                      border: isCurrent
+                        ? '2px solid #38bdf8'
+                        : isPassed
+                        ? '1.5px solid #10b981'
+                        : '1px solid var(--border, #e2e8f0)',
+                      opacity: isLocked ? 0.65 : 1,
+                      display: 'flex',
+                      flexDirection: 'column',
+                      justifyContent: 'space-between',
+                    }}
+                  >
+                    <div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                        <span style={{ fontSize: 11, fontWeight: 800, color: isCurrent ? '#0284c7' : isPassed ? '#059669' : '#64748b' }}>
+                          LEVEL {tier.level} • {tier.xpRange}
+                        </span>
+                        <span
+                          style={{
+                            fontSize: 10.5,
+                            fontWeight: 800,
+                            padding: '2px 8px',
+                            borderRadius: 6,
+                            background: isCurrent
+                              ? 'rgba(56, 189, 248, 0.15)'
+                              : isPassed
+                              ? 'rgba(16, 185, 129, 0.15)'
+                              : 'rgba(100, 116, 139, 0.12)',
+                            color: isCurrent ? '#0284c7' : isPassed ? '#059669' : '#64748b',
+                          }}
+                        >
+                          {isCurrent ? '⭐ Active Rank' : isPassed ? '✓ Achieved' : '🔒 Locked'}
+                        </span>
+                      </div>
+
+                      <h4 style={{ margin: '4px 0 6px', fontSize: 16, fontWeight: 800, color: 'var(--text, #0f172a)', display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span>{tier.icon}</span> {tier.title}
+                      </h4>
+                      <p style={{ margin: 0, fontSize: 12, color: 'var(--text-muted, #64748b)', lineHeight: 1.4 }}>
+                        {tier.perk}
+                      </p>
+                    </div>
+
+                    <div style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--border, #f1f5f9)', fontSize: 11, fontWeight: 700 }}>
+                      {isCurrent ? (
+                        <span style={{ color: '#0284c7' }}>
+                          In Progress: {xpIntoCurrentLevel} / {xpNeededForNextLevel} XP ({levelProgressPct}%)
+                        </span>
+                      ) : isPassed ? (
+                        <span style={{ color: '#059669' }}>Completed Milestone ✓</span>
+                      ) : (
+                        <span style={{ color: '#64748b' }}>Unlocks at {tier.minXp} Real XP</span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Section C: Past XP Activity Audit Trail */}
+          <div
+            style={{
+              background: 'var(--surface, #ffffff)',
+              borderRadius: 20,
+              padding: '22px 24px',
+              border: '1px solid var(--border, #e2e8f0)',
+              boxShadow: '0 2px 10px rgba(0,0,0,0.03)',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 10 }}>
+              <div>
+                <h3 style={{ margin: 0, fontSize: 17, fontWeight: 800, color: 'var(--text, #0f172a)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <History size={18} color="#0ea5e9" /> Past Real XP Audit Trail
+                </h3>
+                <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--text-muted, #64748b)' }}>
+                  Chronological history of all actions that contributed to your current level and score.
+                </p>
+              </div>
+
+              <span style={{ fontSize: 12, fontWeight: 700, color: '#64748b', background: 'var(--bg-muted, #f1f5f9)', padding: '4px 10px', borderRadius: 99 }}>
+                Showing past {pastXpActivities.length} logs
+              </span>
+            </div>
+
+            {pastXpActivities.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: '30px 10px', color: 'var(--text-muted, #64748b)' }}>
+                <p style={{ margin: 0, fontSize: 14, fontWeight: 600 }}>No past activities recorded yet.</p>
+                <small style={{ fontSize: 12 }}>Add items to inventory or mark groceries as consumed to build your XP history!</small>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {pastXpActivities.map((act) => (
+                  <div
+                    key={act.id}
+                    style={{
+                      padding: '12px 16px',
+                      borderRadius: 12,
+                      background: 'var(--bg-muted, #f8fafc)',
+                      border: '1px solid var(--border, #f1f5f9)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      gap: 12,
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                      <span style={{ fontSize: 20 }}>{act.icon}</span>
+                      <div>
+                        <div style={{ fontSize: 13.5, fontWeight: 700, color: 'var(--text, #0f172a)' }}>
+                          {act.title}
+                        </div>
+                        <div style={{ fontSize: 11, color: 'var(--text-muted, #64748b)' }}>
+                          {act.category} • Logged on {act.date}
+                        </div>
+                      </div>
+                    </div>
+
+                    <span
+                      style={{
+                        fontSize: 12,
+                        fontWeight: 800,
+                        color: act.badgeColor,
+                        background: 'var(--surface, #ffffff)',
+                        padding: '4px 10px',
+                        borderRadius: 8,
+                        border: '1px solid var(--border, #cbd5e1)',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 3,
+                      }}
+                    >
+                      <Zap size={12} fill={act.badgeColor} /> +{act.xp} XP
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}
