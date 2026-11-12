@@ -7,7 +7,7 @@ import {
   addNote, markNoteBought, removeNote,
   generateRecipe, getForecast, updateStockWithHistory,
   scanReceipt,
-  getActiveHouseholdCode, toClientGrocery, toClientNote,
+  getActiveHouseholdCode, toClientGrocery, toClientNote, toClientWaste,
 } from '../services/api';
 import { todayKey } from '../utils/dates';
 import {
@@ -134,7 +134,9 @@ export function useGroceryStore(userId) {
   useEffect(() => {
     if (!currentUid || currentUid === 'guest_user') return;
     const householdCode = getActiveHouseholdCode();
-    const url = `http://localhost:5000/api/household/events?userId=${encodeURIComponent(currentUid)}&householdCode=${encodeURIComponent(householdCode || '')}`;
+    const PROD_API_URL = 'https://grovio-backend-k2hl.onrender.com/api';
+    const API_ROOT = import.meta.env.VITE_API_URL || (import.meta.env.PROD ? PROD_API_URL : 'http://localhost:5000/api');
+    const url = `${API_ROOT}/household/events?userId=${encodeURIComponent(currentUid)}&householdCode=${encodeURIComponent(householdCode || '')}`;
 
     let es = null;
     try {
@@ -160,6 +162,13 @@ export function useGroceryStore(userId) {
             setItems((prev) => prev.filter((p) => p.id !== data.id));
           } else if (data.action === 'resolved' && clientItem) {
             setItems((prev) => prev.filter((p) => p.id !== clientItem.id));
+            if (data.item) {
+              const wasteEntry = toClientWaste(data.item);
+              setWasteLog((prev) => {
+                if (prev.some((w) => w.id === wasteEntry.id)) return prev;
+                return [wasteEntry, ...prev];
+              });
+            }
             pushNotif(`Item "${clientItem.name}" marked as ${data.item.status}`, 'info');
           } else if (data.action === 'purged') {
             setItems([]);
@@ -253,7 +262,6 @@ export function useGroceryStore(userId) {
 
   const markConsumed = useCallback(async id => {
     const item = items.find(i => i.id === id);
-    await resolveGrocery(id, 'CONSUMED');
     setItems(p => p.filter(i => i.id !== id));
     if (item) {
       setWasteLog(p => [...p, {
@@ -270,12 +278,13 @@ export function useGroceryStore(userId) {
       }]);
     }
     pushNotif(`${item?.name || 'Item'} marked as consumed ✓`, 'success');
-  }, [items, pushNotif, currentUid]);
+    await resolveGrocery(id, 'CONSUMED').catch(() => {});
+    refreshAll();
+  }, [items, pushNotif, currentUid, refreshAll]);
 
   const markWasted = useCallback(async id => {
     const item = items.find(i => i.id === id);
     if (!item) return;
-    await resolveGrocery(id, 'WASTED');
     setItems(p => p.filter(i => i.id !== id));
 
     const s = getSettings();
@@ -295,7 +304,9 @@ export function useGroceryStore(userId) {
       week: 'This Week',
     }]);
     pushNotif(`${item.name}${priceStr} marked as spoiled / wasted`, 'danger');
-  }, [items, pushNotif, currentUid]);
+    await resolveGrocery(id, 'WASTED').catch(() => {});
+    refreshAll();
+  }, [items, pushNotif, currentUid, refreshAll]);
 
   // ── Pantry toggle with history ─────────────────────────────────────────────
   const togglePantryState = useCallback(async (id, nextState) => {

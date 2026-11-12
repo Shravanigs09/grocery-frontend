@@ -195,7 +195,7 @@ export let mockWasteLog = [
   { id:'w7', userId:'usr_alex', itemName:'Greek Yogurt',category:'Dairy',      quantity: 400, unit:'g', price: 90, date:daysFromNow(-2), week:'This Week', status:'consumed' },
 ];
 
-function toClientWaste(doc) {
+export function toClientWaste(doc) {
   const qtyObj = doc.quantity;
   const quantity = typeof qtyObj === 'object' && qtyObj !== null
     ? (qtyObj.value ?? 1)

@@ -182,6 +182,7 @@ function MainDashboard() {
           <InsightsPage
             items={store.items}
             wasteLog={store.wasteLog}
+            onRefresh={store.refreshAll}
             onOpenRescueRecipes={(items) => setRescueRecipeModalItems(items)}
             onOpenMorningDigest={handleOpenMorningDigest}
           />

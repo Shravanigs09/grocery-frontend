@@ -1,7 +1,7 @@
 // src/components/Analytics/InsightsPage.jsx
 // 100% Real-Life Data: Computed purely from user's actual database inventory, waste logs, and household members
 
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import {
   Trophy,
   Flame,
@@ -12,6 +12,7 @@ import {
   CheckCircle2,
   Clock,
   Lock,
+  RefreshCw,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { fetchHousehold } from '../../services/api';
@@ -22,25 +23,62 @@ export default function InsightsPage({
   wasteLog = [],
   onOpenRescueRecipes,
   onOpenMorningDigest,
+  onRefresh,
 }) {
   const { user } = useAuth();
   const [household, setHousehold] = useState(null);
   const [activeTab, setActiveTab] = useState('achievements'); // 'achievements' | 'leaderboard' | 'quests'
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [lastRefreshedText, setLastRefreshedText] = useState('Live');
 
   // Fetch actual household members from DB
-  useEffect(() => {
-    let mounted = true;
-    fetchHousehold()
+  const loadHousehold = useCallback(() => {
+    return fetchHousehold()
       .then((res) => {
-        if (mounted && res?.household) {
+        if (res?.household) {
           setHousehold(res.household);
         }
       })
       .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    loadHousehold();
+  }, [loadHousehold, user?.householdCode]);
+
+  // Real-time automatic background refresh on mount & every 12 seconds
+  useEffect(() => {
+    let mounted = true;
+    if (onRefresh) {
+      onRefresh().catch(() => {});
+    }
+
+    const timer = setInterval(() => {
+      if (mounted && onRefresh) {
+        onRefresh().catch(() => {});
+      }
+    }, 12000);
+
     return () => {
       mounted = false;
+      clearInterval(timer);
     };
-  }, [user?.householdCode]);
+  }, [onRefresh]);
+
+  const handleManualSync = async () => {
+    if (isRefreshing) return;
+    setIsRefreshing(true);
+    try {
+      if (onRefresh) await onRefresh();
+      await loadHousehold();
+      const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      setLastRefreshedText(`Synced ${timeStr}`);
+    } catch (err) {
+      console.warn('Sync error:', err);
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
 
   // ── 1. REAL METRICS CALCULATION FROM DATABASE ──────────────────────────────
   const consumedItems = useMemo(
@@ -64,40 +102,52 @@ export default function InsightsPage({
       ? 100
       : 0;
 
+  // Bulletproof timestamp parser to prevent NaN
+  const parseTimestamp = (val) => {
+    if (!val) return 0;
+    const t = new Date(val).getTime();
+    return Number.isFinite(t) ? t : 0;
+  };
+
   // ── 2. REAL ZERO-WASTE STREAK CALCULATION ──────────────────────────────────
   // Streak = Number of consecutive days since last wasted item, or since account started
   const realStreakDays = useMemo(() => {
     if (wastedItems.length === 0) {
       if (items.length === 0 && consumedCount === 0) return 0;
-      // If user has active or consumed items and 0 wasted, streak = days since oldest item or user createdAt
-      const oldestDate =
-        items.length > 0
-          ? new Date(items[items.length - 1].createdAt || items[items.length - 1].purchaseDate || Date.now())
-          : new Date(user?.createdAt || Date.now());
-      const diffDays = Math.floor((Date.now() - oldestDate.getTime()) / (1000 * 60 * 60 * 24));
-      return Math.max(1, diffDays + 1);
+      // Get valid timestamps from active items or user createdAt
+      const validTimestamps = items
+        .map((i) => parseTimestamp(i.createdAt || i.purchaseDate))
+        .filter((t) => t > 0);
+      const userCreatedTimestamp = parseTimestamp(user?.createdAt);
+      if (userCreatedTimestamp > 0) validTimestamps.push(userCreatedTimestamp);
+
+      const oldestTimestamp = validTimestamps.length > 0 ? Math.min(...validTimestamps) : Date.now();
+      const diffDays = Math.floor((Date.now() - oldestTimestamp) / (1000 * 60 * 60 * 24));
+      const safeDiff = Number.isFinite(diffDays) ? diffDays : 0;
+      return Math.max(1, safeDiff + 1);
     }
 
     // Find the latest date an item was wasted
-    const lastWasteTimestamp = Math.max(
-      ...wastedItems.map((w) => new Date(w.date || w.resolvedDate || w.updatedAt || 0).getTime())
-    );
+    const wasteTimestamps = wastedItems
+      .map((w) => parseTimestamp(w.date || w.resolvedDate || w.updatedAt))
+      .filter((t) => t > 0);
+    const lastWasteTimestamp = wasteTimestamps.length > 0 ? Math.max(...wasteTimestamps) : 0;
+    if (lastWasteTimestamp === 0) return 0;
     const diffDaysSinceWaste = Math.floor((Date.now() - lastWasteTimestamp) / (1000 * 60 * 60 * 24));
-    return Math.max(0, diffDaysSinceWaste);
+    return Math.max(0, Number.isFinite(diffDaysSinceWaste) ? diffDaysSinceWaste : 0);
   }, [wastedItems, items, consumedCount, user?.createdAt]);
 
   // Streak days of the week (Mon to Today)
   const streakDaysOfWeek = useMemo(() => {
     const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-    const todayIndex = new Date().getDay();
     const result = [];
+    const validStreak = Number.isFinite(realStreakDays) ? realStreakDays : 0;
 
     for (let i = 6; i >= 0; i--) {
       const d = new Date();
       d.setDate(d.getDate() - i);
       const isToday = i === 0;
-      // Mark as completed if the day is within realStreakDays
-      const isStreakDay = realStreakDays > i || (isToday && realStreakDays > 0);
+      const isStreakDay = validStreak > i || (isToday && validStreak > 0);
 
       result.push({
         day: isToday ? 'Today' : dayNames[d.getDay()],
@@ -116,12 +166,14 @@ export default function InsightsPage({
   // +20 XP per streak day
   const realEarnedXp = useMemo(() => {
     const pantryCount = items.filter((i) => i.panelType === 'PANTRY').length;
-    return (
+    const validStreak = Number.isFinite(realStreakDays) ? realStreakDays : 0;
+    const total = (
       consumedCount * 50 +
       items.length * 15 +
       pantryCount * 25 +
-      realStreakDays * 20
+      validStreak * 20
     );
+    return Number.isFinite(total) ? Math.max(0, total) : 0;
   }, [consumedCount, items, realStreakDays]);
 
   const currentLevel = Math.max(1, Math.floor(realEarnedXp / 500) + 1);
@@ -339,7 +391,7 @@ export default function InsightsPage({
                 color: '#059669',
               }}
             >
-              100% Live Database Data
+              ● {lastRefreshedText}
             </span>
           </div>
           <h1
@@ -358,11 +410,44 @@ export default function InsightsPage({
           </p>
         </div>
 
-        <NotificationBellDropdown
-          items={items}
-          onOpenRescueRecipes={onOpenRescueRecipes}
-          onOpenMorningDigest={onOpenMorningDigest}
-        />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <button
+            type="button"
+            onClick={handleManualSync}
+            disabled={isRefreshing}
+            title="Force instant sync with database"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              padding: '8px 14px',
+              borderRadius: 10,
+              border: '1px solid var(--border, #cbd5e1)',
+              background: 'var(--surface, #ffffff)',
+              color: 'var(--text, #0f172a)',
+              fontSize: 12.5,
+              fontWeight: 700,
+              cursor: isRefreshing ? 'wait' : 'pointer',
+              boxShadow: '0 1px 3px rgba(0,0,0,0.06)',
+              transition: 'all 0.15s ease',
+            }}
+          >
+            <RefreshCw
+              size={14}
+              style={{
+                animation: isRefreshing ? 'spin 0.8s linear infinite' : 'none',
+                color: isRefreshing ? '#10b981' : '#64748b',
+              }}
+            />
+            <span>{isRefreshing ? 'Syncing...' : 'Sync Now'}</span>
+          </button>
+
+          <NotificationBellDropdown
+            items={items}
+            onOpenRescueRecipes={onOpenRescueRecipes}
+            onOpenMorningDigest={onOpenMorningDigest}
+          />
+        </div>
       </div>
 
       {/* ── Hero Row: Player Level XP Card & Real Streak Card ────────────── */}
