@@ -115,55 +115,86 @@ export default function InsightsPage({
   };
 
   // ── 2. REAL ZERO-WASTE STREAK CALCULATION ──────────────────────────────────
-  // Current active zero-waste streak (days since last wasted item, or since start)
-  const realStreakDays = useMemo(() => {
-    if (wastedItems.length === 0) {
-      if (items.length === 0 && consumedCount === 0) return 0;
-      const validTimestamps = items
-        .map((i) => parseTimestamp(i.createdAt || i.purchaseDate))
-        .filter((t) => t > 0);
-      const userCreatedTimestamp = parseTimestamp(user?.createdAt);
-      if (userCreatedTimestamp > 0) validTimestamps.push(userCreatedTimestamp);
+  // A true streak counts consecutive days of active kitchen management with 0 wasted items
+  const { realStreakDays, bestStreakDays, activeDatesSet } = useMemo(() => {
+    const activeDates = new Set();
+    const wasteDates = new Set();
 
-      const oldestTimestamp = validTimestamps.length > 0 ? Math.min(...validTimestamps) : Date.now();
-      const diffDays = Math.floor((Date.now() - oldestTimestamp) / (1000 * 60 * 60 * 24));
-      const safeDiff = Number.isFinite(diffDays) ? diffDays : 0;
-      return Math.max(1, safeDiff + 1);
+    consumedItems.forEach((c) => {
+      const d = toDateKey(c.date || c.resolvedDate || c.updatedAt);
+      if (d) activeDates.add(d);
+    });
+
+    items.forEach((i) => {
+      const d = toDateKey(i.createdAt || i.purchaseDate);
+      if (d) activeDates.add(d);
+    });
+
+    wastedItems.forEach((w) => {
+      const d = toDateKey(w.date || w.resolvedDate || w.updatedAt);
+      if (d) wasteDates.add(d);
+    });
+
+    if (items.length === 0 && consumedItems.length === 0) {
+      return { realStreakDays: 0, bestStreakDays: 0, activeDatesSet: activeDates };
     }
 
-    const wasteTimestamps = wastedItems
-      .map((w) => parseTimestamp(w.date || w.resolvedDate || w.updatedAt))
-      .filter((t) => t > 0);
-    const lastWasteTimestamp = wasteTimestamps.length > 0 ? Math.max(...wasteTimestamps) : 0;
-    if (lastWasteTimestamp === 0) return 0;
-    const diffDaysSinceWaste = Math.floor((Date.now() - lastWasteTimestamp) / (1000 * 60 * 60 * 24));
-    return Math.max(0, Number.isFinite(diffDaysSinceWaste) ? diffDaysSinceWaste : 0);
-  }, [wastedItems, items, consumedCount, user?.createdAt]);
+    // Sort distinct active dates chronologically to find historical longest streak
+    const sortedDates = Array.from(activeDates).sort();
+    let maxHistoricalStreak = 1;
+    let currentRun = 0;
+    let prevTimestamp = null;
 
-  // All-time best historical zero-waste streak
-  const bestStreakDays = useMemo(() => {
-    if (wastedItems.length === 0) {
-      return Math.max(1, realStreakDays);
-    }
-    const wasteTimestamps = wastedItems
-      .map((w) => parseTimestamp(w.date || w.resolvedDate || w.updatedAt))
-      .filter((t) => t > 0)
-      .sort((a, b) => a - b);
+    for (const dateStr of sortedDates) {
+      if (wasteDates.has(dateStr)) {
+        currentRun = 0;
+        prevTimestamp = null;
+        continue;
+      }
 
-    if (wasteTimestamps.length === 0) return Math.max(1, realStreakDays);
-
-    let maxGap = realStreakDays;
-    const userStart = parseTimestamp(user?.createdAt) || (wasteTimestamps[0] - 86400000 * 3);
-    const firstGap = Math.floor((wasteTimestamps[0] - userStart) / 86400000);
-    if (firstGap > maxGap) maxGap = firstGap;
-
-    for (let i = 1; i < wasteTimestamps.length; i++) {
-      const gap = Math.floor((wasteTimestamps[i] - wasteTimestamps[i - 1]) / 86400000);
-      if (gap > maxGap) maxGap = gap;
+      const t = new Date(dateStr).getTime();
+      if (prevTimestamp === null) {
+        currentRun = 1;
+      } else {
+        const diffDays = Math.round((t - prevTimestamp) / (1000 * 60 * 60 * 24));
+        if (diffDays === 1) {
+          currentRun += 1;
+        } else if (diffDays > 1) {
+          currentRun = 1;
+        }
+      }
+      if (currentRun > maxHistoricalStreak) maxHistoricalStreak = currentRun;
+      prevTimestamp = t;
     }
 
-    return Math.max(realStreakDays, maxGap);
-  }, [wastedItems, realStreakDays, user?.createdAt]);
+    // Current active streak: check consecutive active days backwards from today/yesterday
+    const todayStr = toDateKey(new Date());
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yesterdayStr = toDateKey(yesterday);
+
+    let activeStreak = 0;
+    let checkDate = activeDates.has(todayStr) ? new Date() : yesterday;
+    for (let i = 0; i < 365; i++) {
+      const dStr = toDateKey(checkDate);
+      if (activeDates.has(dStr) && !wasteDates.has(dStr)) {
+        activeStreak += 1;
+        checkDate.setDate(checkDate.getDate() - 1);
+      } else {
+        break;
+      }
+    }
+
+    // Safe baseline: if user has clean active inventory with 0 waste, baseline streak is 1
+    const finalActive = Math.max(activeStreak, (items.length > 0 && wastedItems.length === 0) ? 1 : 0);
+    const finalBest = Math.max(finalActive, maxHistoricalStreak);
+
+    return {
+      realStreakDays: finalActive,
+      bestStreakDays: finalBest,
+      activeDatesSet: activeDates,
+    };
+  }, [items, consumedItems, wastedItems]);
 
   // Dynamic Past Days History (7 or 14 days)
   const pastDaysHistory = useMemo(() => {
@@ -233,10 +264,11 @@ export default function InsightsPage({
     'Zero-Waste Guardian',
     'Culinary Alchemist',
     'Grandmaster Chef',
+    'Zero-Waste Legend',
   ];
   const levelTitle = levelTitles[Math.min(currentLevel - 1, levelTitles.length - 1)];
 
-  // All 6 Level Tiers Roadmap
+  // All 7 Level Tiers Roadmap
   const allLevelTiers = [
     {
       level: 1,
@@ -281,10 +313,18 @@ export default function InsightsPage({
     {
       level: 6,
       title: 'Grandmaster Chef',
-      xpRange: '2,500+ XP',
+      xpRange: '2,500 – 2,999 XP',
       minXp: 2500,
       icon: '👑',
-      perk: 'Pinnacle zero-waste badge & full multi-tenant family synchronizer.',
+      perk: 'Master preservation expert: Full household family synchronizer & waste metrics.',
+    },
+    {
+      level: 7,
+      title: 'Zero-Waste Legend',
+      xpRange: '3,000+ XP',
+      minXp: 3000,
+      icon: '🌟',
+      perk: 'Pinnacle sustainability master: 100% kitchen efficiency, family mentor & zero organic waste.',
     },
   ];
 
