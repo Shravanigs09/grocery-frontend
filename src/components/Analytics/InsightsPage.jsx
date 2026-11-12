@@ -19,7 +19,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { fetchHousehold } from '../../services/api';
-import { todayKey } from '../../utils/dates';
+import { todayKey, toDateKey } from '../../utils/dates';
 import NotificationBellDropdown from '../Notifications/NotificationBellDropdown';
 
 export default function InsightsPage({
